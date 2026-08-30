@@ -24,8 +24,9 @@ from app.ai.intent_parser import parse_intent
 from app.decision import decide
 from app.templates import messages as tpl
 from app.integrations.whatsapp import send_whatsapp_message
-from app.booking.engine import search_availability, create_booking
+from app.workflows.n8n_client import call_n8n
 from app.message_buffer import message_buffer
+from app.repositories.appointment import create_appointment
 from app.web.routes import router as web_router
 
 app = FastAPI(title="AI Booking Simple", version="0.2.0")
@@ -415,35 +416,21 @@ async def process_messages(messages: list[dict]):
         reply_text = "Ti metto in contatto con un operatore. Un attimo di pazienza…"
 
     elif decision["action"] == "call_n8n":
-        # Nome storico dell'azione (era "chiama n8n"); ora chiama il motore
-        # locale in app/booking/engine.py. Il nome non è stato rinominato
-        # per minimizzare il diff su decision.py, che lo produce ancora.
         if decision.get("template_key") == "verifying_availability":
             wa_info = tenant.get("info") or {}
             token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
             phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
             await send_whatsapp_message(phone, tpl.VERIFYING_AVAILABILITY, token, phone_id)
 
-        n8n_action = decision.get("n8n_action")  # "search_availability" | "create_booking"
-        context.setdefault("booking", {})["action"] = n8n_action
+        # Segnale esplicito per n8n: cosa deve fare esattamente
+        # ("search_availability" o "create_booking"). Senza questo,
+        # n8n non ha modo di distinguere le due chiamate.
+        context.setdefault("booking", {})["action"] = decision.get("n8n_action")
 
         try:
-            if n8n_action == "create_booking":
-                context["booking"] = create_booking(
-                    tenant=tenant,
-                    knowledge=knowledge,
-                    collected_data=collected,
-                    customer=customer,
-                    phone_number=phone,
-                )
-            else:
-                context["booking"] = search_availability(
-                    tenant=tenant,
-                    knowledge=knowledge,
-                    collected_data=collected,
-                )
+            context = call_n8n(decision["workflow"], context)
         except Exception as e:
-            print(f"[main] Errore motore prenotazioni locale: {e}")
+            print(f"[main] Errore call_n8n: {e}")
             context.setdefault("booking", {})["result"] = {
                 "success": False,
                 "error": str(e),
@@ -473,13 +460,19 @@ async def process_messages(messages: list[dict]):
                 else:
                     new_collected.pop("no_slots_state", None)
 
-                # NOTA: a differenza del vecchio flusso n8n, qui non serve
-                # più un secondo salvataggio: create_booking() ha già
-                # inserito la riga in appointments (con vincolo DB anti
-                # sovrapposizione). Se result.error == "slot_conflict",
-                # vuol dire che un'altra richiesta concorrente ha preso lo
-                # stesso slot un istante prima: _build_reply_after_n8n lo
-                # traduce in BOOKING_FAILED.
+                # Prenotazione creata con successo su Google Calendar (via n8n)
+                # → il backend, unico responsabile del DB, salva la riga.
+                if decision.get("n8n_action") == "create_booking" and result.get("success"):
+                    slot = booking.get("selected_slot") or new_collected.get("selected_slot") or {}
+                    create_appointment(
+                        tenant_id=tenant.get("id"),
+                        customer_id=customer.get("id"),
+                        phone_number=phone,
+                        service=new_collected.get("service"),
+                        appointment_date=slot.get("date") if isinstance(slot, dict) else None,
+                        appointment_time=slot.get("time") if isinstance(slot, dict) else None,
+                        google_event_id=result.get("google_event_id"),
+                    )
 
             update_conversation(
                 conversation["id"],
