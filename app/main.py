@@ -232,21 +232,13 @@ async def whatsapp_webhook(request: Request):
 
     # Passa dal message_buffer: fa debounce (messaggi ravvicinati uniti) e
     # garantisce che non ci siano due elaborazioni parallele per lo stesso
-    # numero. Il flush avviene in un thread separato, così non blocchiamo
-    # mai l'event loop principale di FastAPI (parse_intent e call_n8n sono
-    # chiamate sincrone/bloccanti).
-    message_buffer.add_message(message["from"], message, _process_messages_sync)
+    # numero. Gira sullo stesso event loop di FastAPI (asyncio.create_task),
+    # non su un thread separato: più affidabile su hosting PaaS dove i
+    # thread di background non sono garantiti restare vivi fuori dal
+    # ciclo di richiesta.
+    await message_buffer.add_message(message["from"], message, process_messages)
 
     return {"status": "accepted"}
-
-
-def _process_messages_sync(messages: list[dict]):
-    """
-    Wrapper sincrono usato dal message_buffer (che gira su threading.Timer,
-    quindi in un thread separato dal loop asyncio principale).
-    Crea un proprio event loop dedicato a questo batch di messaggi.
-    """
-    asyncio.run(process_messages(messages))
 
 
 def _extract_message(payload: dict) -> dict | None:
