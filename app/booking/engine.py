@@ -273,8 +273,14 @@ def _generate_and_filter_slots(ctx: dict, busy_events: list[dict]) -> dict:
 
     # Filtro fascia preferita + fallback (identico alla logica n8n)
     pw = ctx.get("preferred_window")
+    # Parte da True: se non c'è alcuna fascia oraria richiesta (pw è
+    # None), o se c'è una data richiesta, non c'è nulla da "mancare" —
+    # gli slot restituiti sono già dentro la finestra richiesta per
+    # costruzione (all_slots è generato solo entro from_date/to_date).
+    # Diventa False solo nei due casi di fallback reali qui sotto:
+    # orario esatto non disponibile, o fascia oraria vuota.
     filtered = all_slots
-    matched_preferences = False
+    matched_preferences = True
 
     if pw:
         if pw.get("exact"):
@@ -282,7 +288,6 @@ def _generate_and_filter_slots(ctx: dict, busy_events: list[dict]) -> dict:
             exact = [s for s in all_slots if s["start"].hour == eh and s["start"].minute == em]
             if exact:
                 filtered = exact
-                matched_preferences = True
             else:
                 target = eh * 60 + em
 
@@ -290,6 +295,7 @@ def _generate_and_filter_slots(ctx: dict, busy_events: list[dict]) -> dict:
                     return abs(s["start"].hour * 60 + s["start"].minute - target)
 
                 filtered = sorted(all_slots, key=_dist)
+                matched_preferences = False
         else:
             in_window = [
                 s for s in all_slots
@@ -297,7 +303,8 @@ def _generate_and_filter_slots(ctx: dict, busy_events: list[dict]) -> dict:
             ]
             if in_window:
                 filtered = in_window
-                matched_preferences = True
+            else:
+                matched_preferences = False
 
     filtered = sorted(filtered, key=lambda s: s["start"])
     top = filtered[:MAX_CANDIDATE_SLOTS]
