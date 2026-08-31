@@ -427,12 +427,6 @@ def _handle_booking_step(
         "preferences"
     ) or {}
 
-    has_date_pref = bool(
-        prefs.get("date")
-        or prefs.get("date_from")
-        or prefs.get("period")
-    )
-
     person_name = updated.get(
         "person_name"
     )
@@ -471,7 +465,15 @@ def _handle_booking_step(
         STEP_ASKING_DATE,
         STEP_ASKING_TIME,
     ):
-        if service and has_date_pref:
+        # Cerchiamo subito, anche senza alcuna preferenza temporale:
+        # in quel caso il motore restituisce gli slot cronologicamente
+        # più vicini (comunque mai prima di min_lead_hours). Non
+        # chiediamo più "che giorno ti andrebbe bene?" quando non è
+        # strettamente necessario: se il cliente aveva già espresso
+        # una preferenza (data, periodo o fascia oraria) viene comunque
+        # rispettata, dato che è già stata unita in "prefs" da
+        # _merge_entities_and_preferences più sopra.
+        if service:
             decision["step"] = STEP_SHOWING_SLOTS
             decision["action"] = "call_n8n"
             decision["n8n_action"] = (
