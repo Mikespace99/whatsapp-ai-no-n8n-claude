@@ -4,6 +4,7 @@ Restituisce sempre un JSON strutturato.
 """
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -238,6 +239,39 @@ Restituisci SOLO il JSON, nient'altro.
 
 
 # ============================================================
+# RILEVAMENTO DIRETTO DEL GIORNO DELLA SETTIMANA NEL TESTO
+# ============================================================
+# Rete di sicurezza indipendente dall'AI: un modello linguistico non
+# obbedisce sempre al 100% alle istruzioni del prompt (osservato in
+# produzione: a volte ignora l'indicazione di usare 'weekday' e calcola
+# comunque una 'date' da solo, riproducendo l'errore che weekday doveva
+# prevenire). Individuare un nome di giorno della settimana in italiano
+# è un compito banale e deterministico: non ha senso delegarlo all'AI.
+# Se lo troviamo nel testo, forziamo 'weekday' noi stessi in Python,
+# a prescindere da cosa l'AI abbia messo in 'date'.
+
+_ITALIAN_WEEKDAY_WORDS = {
+    "lunedì": "monday", "lunedi": "monday",
+    "martedì": "tuesday", "martedi": "tuesday",
+    "mercoledì": "wednesday", "mercoledi": "wednesday",
+    "giovedì": "thursday", "giovedi": "thursday",
+    "venerdì": "friday", "venerdi": "friday",
+    "sabato": "saturday",
+    "domenica": "sunday",
+}
+
+
+def _detect_weekday_in_text(text: str) -> str | None:
+    """Cerca un nome di giorno della settimana nel testo (case-insensitive,
+    con o senza accento). Ritorna il valore enum inglese o None."""
+    lowered = (text or "").lower()
+    for word, enum_value in _ITALIAN_WEEKDAY_WORDS.items():
+        if word in lowered:
+            return enum_value
+    return None
+
+
+# ============================================================
 # RISOLUZIONE DETERMINISTICA weekday + period → date
 # ============================================================
 # L'AI estrae SOLO etichette (weekday, period): il calcolo della data
@@ -438,6 +472,19 @@ def parse_intent(
 
         entities = data.get("entities") or {}
         preferences = data.get("preferences") or {}
+
+        # Rete di sicurezza: se l'AI non ha usato 'weekday' ma il testo
+        # contiene chiaramente un nome di giorno della settimana (e
+        # nessuna cifra che faccia pensare a una data assoluta esplicita
+        # tipo "il 15 settembre"), lo rileviamo noi e scartiamo
+        # qualunque 'date' l'AI abbia calcolato da sola per quel giorno.
+        if not preferences.get("weekday") and not re.search(r"\d", message_text or ""):
+            detected_weekday = _detect_weekday_in_text(message_text)
+            if detected_weekday:
+                preferences = dict(preferences)
+                preferences["weekday"] = detected_weekday
+                preferences["date"] = None
+
         preferences = _resolve_weekday_preference(preferences, now)
 
         return {
