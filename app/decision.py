@@ -133,21 +133,7 @@ def decide(intent_result: dict, conversation: dict) -> dict:
         return decision
 
 
-    # ========================================================
-    # 1b. GESTIONE CHIUSURA / RINGRAZIAMENTI
-    # ========================================================
-    # Se la prenotazione è completata e l'utente saluta o ringrazia,
-    # chiudiamo la conversazione e lo riportiamo in IDLE.
-    if current_step == STEP_COMPLETED or current_workflow == WORKFLOW_BOOKING and current_step == STEP_COMPLETED:
-     if intent in (INTENT_GREETING, INTENT_CONFIRM, INTENT_AFFIRM) or intent == "greeting": 
-        decision["workflow"] = WORKFLOW_IDLE
-        decision["step"] = STEP_NONE
-        decision["template_key"] = "welcome" # o un template di chiusura tipo "thanks" se lo hai
-        decision["change_workflow"] = True
-        decision["updated_collected"] = {} # Svuota i dati vecchi per la prossima prenotazione
-    return decision
-
-  
+    
     # ========================================================
     # 2. SALUTO
     # ========================================================
