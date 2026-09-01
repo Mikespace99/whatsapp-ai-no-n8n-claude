@@ -1,11 +1,5 @@
-"""
-AI#1 – Intent + Entities + Preferences extractor.
-Restituisce sempre un JSON strutturato.
-"""
-
 import json
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from openai import OpenAI
@@ -52,20 +46,21 @@ ALLOWED_INTENTS = [
 
 
 # ============================================================
-# SYSTEM PROMPT
+# SYSTEM PROMPT UNIVERSALE
 # ============================================================
 
 def _build_system_prompt(today_str: str, weekday_str: str) -> str:
     intents_list = ", ".join(f'"{i}"' for i in ALLOWED_INTENTS)
 
     return f"""
-Sei un classificatore di intent per un sistema di prenotazione
-appuntamenti via WhatsApp.
+Sei un classificatore di intent ed estrattore di preferenze universale per un sistema di prenotazione appuntamenti via WhatsApp.
 
-Analizza il messaggio dell'utente considerando anche:
+Il tuo compito principale è tradurre qualsiasi espressione temporale umana (anche vaga, implicita, progressiva o consecutiva) in una finestra temporale e oraria precisa, espressa tramite intervalli di date (date_from/date_to) e una preferenza oraria.
+
+Analizza il messaggio corrente dell'utente considerando attentamente il contesto fornito:
 - workflow attuale
 - step attuale
-- ultime battute della conversazione
+- ultime battute della conversazione (fondamentali per capire rettifiche o messaggi consecutivi)
 
 Restituisci SOLO un JSON valido con questa struttura:
 
@@ -80,261 +75,57 @@ Restituisci SOLO un JSON valido con questa struttura:
     "info_type": null o "parking" o "price" o "address" o "hours" o "other"
   }},
   "preferences": {{
-    "date": null o "YYYY-MM-DD",
     "date_from": null o "YYYY-MM-DD",
     "date_to": null o "YYYY-MM-DD",
-    "period": null o "today" o "tomorrow" o "this_week" o "next_week",
-    "weekday": null o "monday" o "tuesday" o "wednesday" o "thursday" o "friday" o "saturday" o "sunday",
     "time_preference": null o "morning" o "afternoon" o "evening" o "exact",
     "exact_time": null o "HH:MM"
   }},
-  "notes": null o breve nota
+  "notes": null o breve nota sul ragionamento temporale effettuato
 }}
 
-INTENT AMMESSI (usa ESATTAMENTE queste stringhe):
+INTENT AMMESSI:
 {intents_list}
 
 
-REGOLE INTENT:
+REGOLE LOGICHE DI TRADUZIONE TEMPORALE UNIVERSALE:
 
-- Saluto
-  → "greeting"
+Oggi è {weekday_str} {today_str}. Usa questa data come unico perno per tutti i calcoli sul calendario.
 
-- Vuole prenotare un appuntamento
-  → "book_appointment"
+Devi valorizzare "preferences" calcolando SEMPRE gli intervalli corretti (date_from e date_to) in base a ciò che l'utente chiede, integrando il messaggio attuale con la cronologia precedente:
 
-- Vuole spostare un appuntamento già esistente
-  → "reschedule_appointment"
+1. SINGOLO GIORNO (es. "venerdì", "il 15 settembre"):
+   Imposta sia date_from che date_to allo stesso identico giorno calcolato.
+   - "venerdì" (se oggi è martedì 1) → date_from="2026-09-05" e date_to="2026-09-05".
+   - "venerdì" (se l'utente prima ha detto "settimana prossima") → calcola il venerdì della settimana successiva.
 
-- Vuole cancellare un appuntamento già esistente
-  → "cancel_appointment"
+2. PERIODI MACRO O VAGHI (es. "settimana prossima", "inizio settimana", "nel weekend", "oggi", "domani"):
+   Traduci l'espressione nella sua migliore approssimazione logica di intervallo temporale (estremi inclusi):
+   - "settimana prossima" → date_from = lunedì della settimana successiva, date_to = domenica della settimana successiva.
+   - "inizio settimana" (nel contesto della settimana prossima) → date_from = lunedì della settimana successiva, date_to = mercoledì della settimana successiva.
+   - "nel weekend" → date_from = sabato di quella settimana, date_to = domenica di quella settimana.
+   - "oggi" / "domani" → calcola le rispettive date reali in formato YYYY-MM-DD.
 
-- Chiede informazioni
-  (prezzo, parcheggio, orari, indirizzo...)
-  → "get_info"
-  e popola entities.info_type di conseguenza
+3. FASCE ORARIE (es. "di mattina", "pomeriggio", "alle 10:30"):
+   Mappa fedelmente le preferenze orarie:
+   - "mattina" → time_preference = "morning"
+   - "pomeriggio" → time_preference = "afternoon"
+   - "sera" o "tardi" → time_preference = "evening"
+   - "alle 10:30" (orario specifico) → time_preference = "exact" e exact_time = "10:30"
 
-- Sceglie uno degli slot attualmente mostrati
-  ("il secondo", "numero 2", "alle 10:30")
-  → "slot_selection"
-
-- Conferma una scelta o una richiesta
-  ("sì", "ok", "va bene", "confermo")
-  → "confirm" oppure "affirm"
-
-- Rifiuta una specifica scelta che gli viene chiesto di confermare
-  ("no", "non va bene")
-  → "deny"
-
-- Se il workflow è "booking" e lo step è "showing_slots",
-  l'utente rifiuta gli slot attualmente mostrati e vuole
-  una nuova ricerca di disponibilità:
-  ("nessuno va bene",
-   "nessuno di questi",
-   "prova domani",
-   "hai qualcosa venerdì?",
-   "questi orari non vanno bene",
-   "vediamo settimana prossima",
-   "domani hai qualcosa?")
-  → "change_availability"
-
-IMPORTANTE:
-
-"change_availability" NON significa cancellare o spostare
-un appuntamento già esistente.
-
-Significa che l'utente sta effettuando una prenotazione,
-ha ricevuto degli slot, non li vuole e desidera cambiare
-i criteri della ricerca di disponibilità.
-
-Quando riconosci "change_availability", estrai tutte le
-nuove preferenze temporali presenti nel messaggio.
-
-Esempi:
-
-"Nessuno va bene, prova domani"
-→ intent = "change_availability"
-→ preferences.period = "tomorrow"
-
-"Prova venerdì pomeriggio"
-→ intent = "change_availability"
-→ preferences.weekday = "friday"
-→ preferences.time_preference = "afternoon"
-
-"Hai qualcosa settimana prossima?"
-→ intent = "change_availability"
-→ preferences.period = "next_week"
-
-"Nessuno di questi va bene"
-→ intent = "change_availability"
-→ nessuna nuova preferenza temporale
+4. GESTIONE DEI MESSAGGI CONSECUTIVI E RETTIFICHE (FONDAMENTALE):
+   Guarda le ultime battute. Se l'utente ha appena detto "settimana prossima" e nel messaggio corrente aggiunge solo "di mattina" o "inizio settimana", mantieni la finestra temporale della settimana prossima e applica il restringimento giornaliero o la fascia oraria richiesti.
+   Se invece l'utente cambia radicalmente idea ("Anzi no, preferisco oggi"), cancella il filtro precedente e sposta la finestra sulla nuova richiesta.
 
 
-IMPORTANTE SULLA DISTINZIONE:
+REGOLE SULL'INTENT "change_availability":
+Se il workflow attuale è "booking" e lo step attuale è "showing_slots", e l'utente rifiuta le proposte precedenti o chiede variazioni (es: "Ma per inizio settimana non c'è posto?", "Qualcosa nel pomeriggio?", "Nessuno va bene, prova domani"), l'intent è TASSATIVAMENTE "change_availability". In questo caso, ricalcola la nuova finestra temporale/oraria integrando la richiesta attuale con il contesto precedente.
 
-"il secondo"
-→ "slot_selection"
-
-"alle 16:00"
-→ "slot_selection"
-
-"no"
-mentre viene chiesto di confermare uno specifico slot
-→ "deny"
-
-"nessuno va bene, prova domani"
-→ "change_availability"
-
-"questi orari non vanno bene, hai qualcosa venerdì?"
-→ "change_availability"
-
-
-DATA ODIERNA:
-
-Oggi è {weekday_str} {today_str}.
-
-REGOLE SU DATE E GIORNI DELLA SETTIMANA — IMPORTANTE:
-
-NON calcolare MAI tu la data quando l'utente fa riferimento a un
-giorno della settimana ("venerdì", "lunedì prossimo", "mercoledì
-della prossima settimana", ecc.). In questi casi usa SOLO:
-- preferences.weekday → il giorno della settimana menzionato
-  ("monday".."sunday")
-- preferences.period → "next_week" se l'utente dice esplicitamente
-  "prossima settimana"/"settimana prossima", "this_week" se dice
-  "questa settimana", altrimenti null
-
-Il calcolo della data esatta a partire da weekday+period viene fatto
-da un programma, non da te: è più affidabile e non deve mai sbagliare.
-
-Usa invece preferences.date SOLO quando l'utente esprime una data
-assoluta ed esplicita (es. "il 15 settembre", "15/09", "2026-09-20"):
-in quel caso calcola tu la data in formato YYYY-MM-DD.
-
-Per "oggi" e "domani" usa preferences.period = "today" / "tomorrow"
-(non calcolare tu la data anche in questo caso).
-
-Esempi:
-
-"Vorrei un appuntamento mercoledì della prossima settimana"
-→ preferences.weekday = "wednesday"
-→ preferences.period = "next_week"
-→ (NON preferences.date)
-
-"Hai qualcosa venerdì?"
-→ preferences.weekday = "friday"
-→ (NON preferences.date)
-
-"Il 20 settembre va bene?"
-→ preferences.date = "2026-09-20" (data assoluta, qui sì che la calcoli tu)
-
-Le preferenze di data/ora sono criteri per la ricerca
-di disponibilità e devono essere estratte fedelmente.
-Se l'utente esprime SOLO una fascia oraria (mattina/pomeriggio/sera)
-senza indicare alcun giorno, estrai solo preferences.time_preference
-e lascia data/weekday/period a null: è una preferenza valida da sola.
-
-Restituisci SOLO il JSON, nient'altro.
+Restituisci SOLO il codice JSON, senza alcun testo prima o dopo.
 """.strip()
 
 
 # ============================================================
-# RILEVAMENTO DIRETTO DEL GIORNO DELLA SETTIMANA NEL TESTO
-# ============================================================
-# Rete di sicurezza indipendente dall'AI: un modello linguistico non
-# obbedisce sempre al 100% alle istruzioni del prompt (osservato in
-# produzione: a volte ignora l'indicazione di usare 'weekday' e calcola
-# comunque una 'date' da solo, riproducendo l'errore che weekday doveva
-# prevenire). Individuare un nome di giorno della settimana in italiano
-# è un compito banale e deterministico: non ha senso delegarlo all'AI.
-# Se lo troviamo nel testo, forziamo 'weekday' noi stessi in Python,
-# a prescindere da cosa l'AI abbia messo in 'date'.
-
-_ITALIAN_WEEKDAY_WORDS = {
-    "lunedì": "monday", "lunedi": "monday",
-    "martedì": "tuesday", "martedi": "tuesday",
-    "mercoledì": "wednesday", "mercoledi": "wednesday",
-    "giovedì": "thursday", "giovedi": "thursday",
-    "venerdì": "friday", "venerdi": "friday",
-    "sabato": "saturday",
-    "domenica": "sunday",
-}
-
-
-def _detect_weekday_in_text(text: str) -> str | None:
-    """Cerca un nome di giorno della settimana nel testo (case-insensitive,
-    con o senza accento). Ritorna il valore enum inglese o None."""
-    lowered = (text or "").lower()
-    for word, enum_value in _ITALIAN_WEEKDAY_WORDS.items():
-        if word in lowered:
-            return enum_value
-    return None
-
-
-# ============================================================
-# RISOLUZIONE DETERMINISTICA weekday + period → date
-# ============================================================
-# L'AI estrae SOLO etichette (weekday, period): il calcolo della data
-# esatta lo fa questo codice, non il modello. Vedi discussione con
-# l'utente: lasciare l'aritmetica delle date a un LLM è intermittente
-# e difficile da testare (es. "mercoledì della prossima settimana"
-# calcolato a volte correttamente, a volte come "lunedì prossimo").
-
-_WEEKDAY_INDEX = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
-}
-
-
-def _resolve_weekday_preference(preferences: dict, now: datetime) -> dict:
-    """
-    Se preferences contiene un 'weekday' valido, lo traduce in una
-    'date' concreta (YYYY-MM-DD) e rimuove weekday/period, così tutto
-    il resto del sistema (decision.py, booking/engine.py) continua a
-    ricevere preferences.date già risolta, esattamente come prima.
-
-    Regole (decise insieme):
-    - weekday + period="next_week" → quel giorno nella settimana di
-      calendario (lun-dom) successiva a quella corrente
-    - weekday + period="this_week" → quel giorno nella settimana di
-      calendario corrente (se già passato, il motore di disponibilità
-      restituirà "nessuno slot" e scatta il fallback esistente:
-      comportamento accettabile, nessuna gestione speciale)
-    - weekday da solo (nessun period) → se il giorno non è ancora
-      passato questa settimana lo uso, altrimenti quello della
-      settimana successiva
-    """
-    weekday = preferences.get("weekday")
-    if not weekday or weekday not in _WEEKDAY_INDEX:
-        return preferences
-
-    target_idx = _WEEKDAY_INDEX[weekday]
-    today_idx = now.weekday()  # Monday=0 .. Sunday=6, coerente con _WEEKDAY_INDEX
-    period = preferences.get("period")
-
-    if period == "next_week":
-        days_to_next_monday = (7 - today_idx) % 7 or 7
-        next_monday = now.date() + timedelta(days=days_to_next_monday)
-        resolved = next_monday + timedelta(days=target_idx)
-    elif period == "this_week":
-        this_monday = now.date() - timedelta(days=today_idx)
-        resolved = this_monday + timedelta(days=target_idx)
-    else:
-        # Nessun modificatore di settimana: prossima occorrenza utile
-        # (oggi stesso se coincide, altrimenti il primo giorno buono
-        # da qui in avanti, anche nella settimana successiva)
-        delta = (target_idx - today_idx) % 7
-        resolved = now.date() + timedelta(days=delta)
-
-    preferences = dict(preferences)
-    preferences["date"] = resolved.isoformat()
-    preferences.pop("weekday", None)
-    preferences.pop("period", None)
-    return preferences
-
-
-# ============================================================
-# PARSE INTENT
+# PARSE INTENT UNIVERSALE
 # ============================================================
 
 def parse_intent(
@@ -345,165 +136,113 @@ def parse_intent(
     timezone_str: str = "Europe/Rome",
 ) -> dict:
     """
-    Chiama l'AI e restituisce il dict strutturato.
-
-    In caso di errore restituisce:
-        intent = unclear
-        confidence = 0.0
+    Chiama l'AI iniettando il contesto storico e temporale.
+    L'IA restituisce le date già risolte in range (date_from/to).
+    Pulisce l'output per essere perfettamente digerito dal motore locale.
     """
 
     recent_messages = recent_messages or []
 
-    # --------------------------------------------------------
-    # Data corrente nel timezone del tenant
-    # --------------------------------------------------------
-
+    # Configurazione Timezone del Tenant
     try:
         tz = ZoneInfo(timezone_str)
     except Exception:
         tz = timezone.utc
 
     now = datetime.now(tz)
-
     today_str = now.strftime("%Y-%m-%d")
 
     weekday_map = {
-        0: "lunedì",
-        1: "martedì",
-        2: "mercoledì",
-        3: "giovedì",
-        4: "venerdì",
-        5: "sabato",
-        6: "domenica",
+        0: "lunedì", 1: "martedì", 2: "mercoledì", 3: "giovedì",
+        4: "venerdì", 5: "sabato", 6: "domenica"
     }
-
     weekday_str = weekday_map[now.weekday()]
 
-    # --------------------------------------------------------
-    # Contesto storico
-    # --------------------------------------------------------
-
+    # Costruzione stringa Cronologia (Ultime 5 battute per il merge semantico dell'IA)
     history_text = ""
-
     if recent_messages:
-        history_text = "Ultime battute della conversazione:\n"
-
-        for m in recent_messages[-4:]:
-            role = (
-                "Cliente"
-                if m.get("role") == "user"
-                else "Assistente"
-            )
-
-            history_text += (
-                f"{role}: {m.get('content')}\n"
-            )
-
+        history_text = "Ultime battute della conversazione per comprendere il contesto:\n"
+        for m in recent_messages[-5:]:
+            role = "Cliente" if m.get("role") == "user" else "Assistente"
+            history_text += f"- {role}: {m.get('content') or m.get('text', '')}\n"
         history_text += "\n"
 
-    # --------------------------------------------------------
-    # Messaggio inviato al modello
-    # --------------------------------------------------------
-
+    # Costruzione del payload di contesto per l'utente AI
     user_content = (
         f"{history_text}"
-        f"Workflow attuale: {current_workflow}\n"
-        f"Step attuale: {current_step}\n"
-        f"Data di oggi: {weekday_str} {today_str}\n"
-        f"Messaggio corrente del cliente: {message_text}"
+        f"Workflow attuale backend: {current_workflow}\n"
+        f"Step attuale backend: {current_step}\n"
+        f"Data/Ora di riferimento attuale del server locale: {weekday_str} {today_str} ore {now.strftime('%H:%M')}\n"
+        f"Messaggio corrente da classificare ed estrarre: {message_text}"
     )
 
-    system_prompt = _build_system_prompt(
-        today_str,
-        weekday_str,
-    )
-
-    # --------------------------------------------------------
-    # Chiamata AI
-    # --------------------------------------------------------
+    system_prompt = _build_system_prompt(today_str, weekday_str)
 
     try:
         response = client.chat.completions.create(
             model=Config.AI_MODEL_INTENT,
             messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_content,
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
             ],
-            temperature=0.1,
+            temperature=0.1,  # Bassissima temperatura per garantire massima stabilità
             response_format={"type": "json_object"},
         )
 
         raw = response.choices[0].message.content
-
         data = json.loads(raw)
 
-        # ----------------------------------------------------
-        # Normalizzazione intent
-        # ----------------------------------------------------
-
-        intent = data.get(
-            "intent",
-            INTENT_UNCLEAR,
-        )
-
+        # Normalizzazione Intent
+        intent = data.get("intent", INTENT_UNCLEAR)
         if intent not in ALLOWED_INTENTS:
             intent = INTENT_UNCLEAR
 
-        # ----------------------------------------------------
-        # Confidence
-        # ----------------------------------------------------
-
+        # Normalizzazione Confidence
         try:
-            confidence = float(
-                data.get("confidence", 0.5)
-            )
+            confidence = float(data.get("confidence", 0.5))
         except (TypeError, ValueError):
             confidence = 0.5
-
-        # ----------------------------------------------------
-        # Entities / Preferences
-        # ----------------------------------------------------
 
         entities = data.get("entities") or {}
         preferences = data.get("preferences") or {}
 
-        # Rete di sicurezza: se l'AI non ha usato 'weekday' ma il testo
-        # contiene chiaramente un nome di giorno della settimana (e
-        # nessuna cifra che faccia pensare a una data assoluta esplicita
-        # tipo "il 15 settembre"), lo rileviamo noi e scartiamo
-        # qualunque 'date' l'AI abbia calcolato da sola per quel giorno.
-        if not preferences.get("weekday") and not re.search(r"\d", message_text or ""):
-            detected_weekday = _detect_weekday_in_text(message_text)
-            if detected_weekday:
-                preferences = dict(preferences)
-                preferences["weekday"] = detected_weekday
-                preferences["date"] = None
-
-        preferences = _resolve_weekday_preference(preferences, now)
+        # Costruiamo il dizionario delle preferenze ripulendo le chiavi legacy.
+        # Questo forza il motore locale a saltare i controlli su 'date' o 'period'
+        # e a usare direttamente il blocco: elif prefs.get("date_from") and prefs.get("date_to"):
+        clean_preferences = {
+            "date_from": preferences.get("date_from"),
+            "date_to": preferences.get("date_to"),
+            "time_preference": preferences.get("time_preference"),
+            "exact_time": preferences.get("exact_time"),
+            
+            # Chiavi legacy esplicitamente a None per evitare conflitti nel motore locale
+            "date": None,
+            "period": None,
+            "weekday": None
+        }
 
         return {
             "intent": intent,
             "confidence": confidence,
             "entities": entities,
-            "preferences": preferences,
+            "preferences": clean_preferences,
             "notes": data.get("notes"),
         }
 
     except Exception as e:
-        print(
-            f"[intent_parser] Errore: {e}"
-        )
-
+        print(f"[intent_parser_universale] Errore critico: {e}")
         return {
             "intent": INTENT_UNCLEAR,
             "confidence": 0.0,
             "entities": {},
-            "preferences": {},
-            "notes": str(e),
+            "preferences": {
+                "date_from": None,
+                "date_to": None,
+                "time_preference": None,
+                "exact_time": None,
+                "date": None,
+                "period": None,
+                "weekday": None
+            },
+            "notes": f"Exception: {str(e)}",
         }
