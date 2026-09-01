@@ -46,7 +46,7 @@ ALLOWED_INTENTS = [
 
 
 # ============================================================
-# SYSTEM PROMPT UNIVERSALE
+# SYSTEM PROMPT UNIVERSALE CON TOLLERANZA FERIALE
 # ============================================================
 
 def _build_system_prompt(today_str: str, weekday_str: str) -> str:
@@ -91,34 +91,32 @@ REGOLE LOGICHE DI TRADUZIONE TEMPORALE UNIVERSALE:
 
 Oggi è {weekday_str} {today_str}. Usa questa data come unico perno per tutti i calcoli sul calendario.
 
-Devi valorizzare "preferences" calcolando SEMPRE gli intervalli corretti (date_from e date_to) in base a ciò che l'utente chiede, integrando il messaggio attuale con la cronologia precedente:
+Devi valorizzare "preferences" calcolando gli intervalli corretti (date_from e date_to). Poiché i professionisti spesso sono chiusi nel weekend, i periodi vaghi devono includere i giorni feriali limitrofi in modo che il calendario trovi slot utili:
 
 1. SINGOLO GIORNO (es. "venerdì", "il 15 settembre"):
    Imposta sia date_from che date_to allo stesso identico giorno calcolato.
-   - "venerdì" (se oggi è martedì 1) → date_from="2026-09-05" e date_to="2026-09-05".
-   - "venerdì" (se l'utente prima ha detto "settimana prossima") → calcola il venerdì della settimana successiva.
+   - "venerdì" (se oggi è martedì 1 settembre) → date_from="2026-09-04" e date_to="2026-09-04".
+   - "venerdì" (se contestualizzato a settimana prossima) → calcola il venerdì della settimana successiva.
 
-2. PERIODI MACRO O VAGHI (es. "settimana prossima", "inizio settimana", "nel weekend", "oggi", "domani"):
-   Traduci l'espressione nella sua migliore approssimazione logica di intervallo temporale (estremi inclusi):
-   - "settimana prossima" → date_from = lunedì della settimana successiva, date_to = domenica della settimana successiva.
-   - "inizio settimana" (nel contesto della settimana prossima) → date_from = lunedì della settimana successiva, date_to = mercoledì della settimana successiva.
-   - "nel weekend" → date_from = sabato di quella settimana, date_to = domenica di quella settimana.
+2. PERIODI MACRO O VAGHI (MAPPATURA OBBLIGATORIA CON TOLLERANZA):
+   - "inizio settimana" / "primi giorni" → Da Lunedì a Mercoledì di quella settimana.
+   - "metà settimana" → Da Martedì a Giovedì di quella settimana.
+   - "fine settimana" / "verso fine settimana" / "seconda metà della settimana" / "weekend" → Da GIOVEDÌ a DOMENICA di quella settimana (Includi sempre giovedì e venerdì perché i professionisti nel weekend sono chiusi!).
+   - "settimana prossima" / "la prossima settimana" → Da Lunedì della settimana successiva a Domenica della settimana successiva.
    - "oggi" / "domani" → calcola le rispettive date reali in formato YYYY-MM-DD.
 
 3. FASCE ORARIE (es. "di mattina", "pomeriggio", "alle 10:30"):
-   Mappa fedelmente le preferenze orarie:
+   Mappa le preferenze orarie:
    - "mattina" → time_preference = "morning"
    - "pomeriggio" → time_preference = "afternoon"
    - "sera" o "tardi" → time_preference = "evening"
-   - "alle 10:30" (orario specifico) → time_preference = "exact" e exact_time = "10:30"
+   - "alle 10:30" → time_preference = "exact" e exact_time = "10:30"
 
-4. GESTIONE DEI MESSAGGI CONSECUTIVI E RETTIFICHE (FONDAMENTALE):
-   Guarda le ultime battute. Se l'utente ha appena detto "settimana prossima" e nel messaggio corrente aggiunge solo "di mattina" o "inizio settimana", mantieni la finestra temporale della settimana prossima e applica il restringimento giornaliero o la fascia oraria richiesti.
-   Se invece l'utente cambia radicalmente idea ("Anzi no, preferisco oggi"), cancella il filtro precedente e sposta la finestra sulla nuova richiesta.
-
+4. GESTIONE DEI MESSAGGI CONSECUTIVI E RETTIFICHE:
+   Guarda le ultime battute. Se l'utente ha appena detto "settimana prossima" e nel messaggio corrente aggiunge "verso fine settimana", calcola la seconda metà (giovedì-domenica) MA della settimana prossima! Combina sempre i filtri a meno che l'utente non smentisca esplicitamente il passato.
 
 REGOLE SULL'INTENT "change_availability":
-Se il workflow attuale è "booking" e lo step attuale è "showing_slots", e l'utente rifiuta le proposte precedenti o chiede variazioni (es: "Ma per inizio settimana non c'è posto?", "Qualcosa nel pomeriggio?", "Nessuno va bene, prova domani"), l'intent è TASSATIVAMENTE "change_availability". In questo caso, ricalcola la nuova finestra temporale/oraria integrando la richiesta attuale con il contesto precedente.
+Se il workflow attuale è "booking" e lo step attuale è "showing_slots", e l'utente rifiuta le proposte precedenti o chiede variazioni (es: "Ma per inizio settimana non c'è posto?", "Qualcosa nel fine settimana?"), l'intent è TASSATIVAMENTE "change_availability".
 
 Restituisci SOLO il codice JSON, senza alcun testo prima o dopo.
 """.strip()
@@ -207,8 +205,6 @@ def parse_intent(
         preferences = data.get("preferences") or {}
 
         # Costruiamo il dizionario delle preferenze ripulendo le chiavi legacy.
-        # Questo forza il motore locale a saltare i controlli su 'date' o 'period'
-        # e a usare direttamente il blocco: elif prefs.get("date_from") and prefs.get("date_to"):
         clean_preferences = {
             "date_from": preferences.get("date_from"),
             "date_to": preferences.get("date_to"),
