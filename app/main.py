@@ -342,7 +342,10 @@ async def process_messages(messages: list[dict]):
         knowledge=knowledge,
     )
 
-    print("[DEBUG] calendar_id nel context:", context["tenant"]["info"].get("google_calendar_id"))
+    # (rimosso il vecchio print di debug "calendar_id nel context": era un
+    # residuo del sistema n8n, il campo google_calendar_id non è più letto
+    # da nessuna parte — la disponibilità oggi si calcola solo dalla
+    # tabella appointments, vedi app/booking/engine.py)
 
     # Se la conversazione precedente era scaduta: avvisa e FERMATI qui.
     # Il messaggio corrente viene scartato (non processato in questo
