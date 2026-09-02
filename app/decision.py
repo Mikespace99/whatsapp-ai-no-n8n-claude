@@ -133,17 +133,36 @@ def decide(intent_result: dict, conversation: dict) -> dict:
         return decision
 
 
-    
     # ========================================================
-    # 2. SALUTO
+    # 2. SALUTO / RINGRAZIAMENTO FINALE
     # ========================================================
 
-    if (
-        intent == INTENT_GREETING
-        and current_workflow == WORKFLOW_IDLE
-    ):
-        decision["template_key"] = "welcome"
-        return decision
+    if intent == INTENT_GREETING:
+        # CASO A: La prenotazione era già finita -> resettiamo e salutiamo
+        if current_step == STEP_COMPLETED:
+            decision["workflow"] = WORKFLOW_IDLE
+            decision["step"] = STEP_NONE
+            decision["template_key"] = "welcome"  # o un template di congedo se lo hai
+            decision["change_workflow"] = True
+            decision["updated_collected"] = {}  # Svuota la memoria per il prossimo appuntamento
+            return decision
+            
+        # CASO B: La chat era già ferma -> diamo il classico benvenuto
+        if current_workflow == WORKFLOW_IDLE:
+            decision["template_key"] = "welcome"
+            return decision
+
+     
+    # ========================================================
+    # 2. SALUTO (OLD)
+    # ========================================================
+
+    #if (
+    #    intent == INTENT_GREETING
+    #    and current_workflow == WORKFLOW_IDLE
+    #):
+    #    decision["template_key"] = "welcome"
+    #    return decision
 
     # ========================================================
     # 3. RICHIESTA OPERATORE
